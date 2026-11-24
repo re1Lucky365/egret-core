@@ -1,3 +1,217 @@
+Master-Hub/
+├── .github/
+│   └── workflows/
+│       └── master-ci.yml
+├── .gitleaks.toml
+├── .gitignore
+├── scripts/
+│   ├── bootstrap.sh
+│   ├── audit_gpg.sh
+│   ├── hash_manifest.py
+│   └── vault_encrypt.py
+├── crates/
+│   └── integrity-cli/
+│       ├── Cargo.toml
+│       └── src/main.rs
+├── tests/
+│   └── test_security_tools.py
+└── README.md
+audit_gpg.sh
+Master-Hub/
+├── .github/
+│   └── workflows/
+│       └── master-ci.yml
+├── .gitleaks.toml
+├── .gitignore
+├── scripts/
+│   ├── bootstrap.sh
+│   ├── audit_gpg.sh
+│   ├── hash_manifest.py
+│   └── vault_encrypt.py
+├── crates/
+│   └── integrity-cli/
+│       ├── Cargo.toml
+│       └── src/main.rs
+├── tests/
+│   └── test_security_tools.py
+└── README.md
+master-ci.yml
+bootstrap.sh
+README.md#!/usr/bin/env python3
+import argparse
+import base64
+import os
+from pathlib import Path
+
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+SALT_SIZE = 16
+ITERATIONS = 480_000
+
+
+def derive_key(password: str, salt: bytes) -> bytes:
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=ITERATIONS,
+    )
+    return base64.urlsafe_b64encode(kdf.derive(password.encode("utf-8")))
+
+
+def encrypt_file(src: Path, dst: Path, password: str) -> None:
+    salt = os.urandom(SALT_SIZE)
+    token = Fernet(derive_key(password, salt)).encrypt(src.read_bytes())
+    dst.write_bytes(salt + token)
+
+
+def decrypt_file(src: Path, dst: Path, password: str) -> None:
+    raw = src.read_bytes()
+    salt, token = raw[:SALT_SIZE], raw[SALT_SIZE:]
+    plain = Fernet(derive_key(password, salt)).decrypt(token)
+    dst.write_bytes(plain)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Local symmetric file encrypt/decrypt")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    enc_p = sub.add_parser("encrypt")
+    enc_p.add_argument("src", type=Path)
+    enc_p.add_argument("dst", type=Path)
+
+    dec_p = sub.add_parser("decrypt")
+    dec_p.add_argument("src", type=Path)
+    dec_p.add_argument("dst", type=Path)
+
+    args = parser.parse_args()
+    password = os.environ.get("VAULT_PASSPHRASE") or input("Enter vault passphrase: ")
+    if args.cmd == "encrypt":
+        encrypt_file(args.src, args.dst, password)
+    else:
+        decrypt_file(args.src, args.dst, password)
+
+
+if __name__ == "__main__":
+    main()
+[package]
+name = "integrity-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sha2 = "0.10"
+walkdir = "2.5"
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::env;
+use std::fs::{self, File};
+use std::io::{BufReader, Read};
+use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
+
+fn hash_file(path: &Path) -> Result<String, std::io::Error> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn scan_dir(root: &Path) -> Result<BTreeMap<String, String>, std::io::Error> {
+    let mut map = BTreeMap::new();
+    for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {
+        if entry.file_type().is_file() {
+            let path: PathBuf = entry.path().to_path_buf();
+            if path.components().any(|c| c.as_os_str() == ".git" || c.as_os_str() == "target") {
+                continue;
+            }
+            let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+            map.insert(rel, hash_file(&path)?);
+        }
+    }
+    Ok(map)
+}
+
+fn main() {
+    let mut args = env::args().skip(1);
+    let cmd = args.next().unwrap_or_else(|| "scan".to_string());
+    let root = PathBuf::from(args.next().unwrap_or_else(|| ".".to_string()));
+
+    match cmd.as_str() {
+        "scan" => {
+            let entries = scan_dir(&root).expect("failed scanning directory");
+            for (rel, digest) in entries {
+                println!("{digest}  {rel}");
+            }
+        }
+        "check" => {
+            let manifest_path = PathBuf::from(args.next().unwrap_or_else(|| "MANIFEST.sha256".to_string()));
+            let content = fs::read_to_string(&manifest_path).expect("failed reading manifest");
+            let current = scan_dir(&root).expect("failed scanning directory");
+            let mut mismatches = 0;
+            for line in content.lines() {
+                if let Some((expected, rel)) = line.split_once("  ") {
+                    match current.get(rel) {
+                        Some(actual) if actual == expected => {}
+                        _ => {
+                            eprintln!("DRIFT: {rel}");
+                            mismatches += 1;
+                        }
+                    }
+                }
+            }
+            if mismatches > 0 {
+                std::process::exit(1);
+            }
+        }
+        _ => {
+            eprintln!("Usage: integrity-cli <scan|check> <dir> [manifest_path]");
+            std::process::exit(2);
+        }
+    }
+}
+from pathlib import Path
+
+from scripts.hash_manifest import generate, verify
+from scripts.vault_encrypt import decrypt_file, encrypt_file
+
+
+def test_manifest_generate_and_verify(tmp_path: Path) -> None:
+    sample = tmp_path / "notes.txt"
+    sample.write_text("integrity-check\n", encoding="utf-8")
+    manifest = tmp_path / "MANIFEST.sha256"
+
+    generate(tmp_path, manifest)
+    assert verify(tmp_path, manifest) == 0
+
+    sample.write_text("tampered\n", encoding="utf-8")
+    assert verify(tmp_path, manifest) == 1
+
+
+def test_vault_encrypt_decrypt_roundtrip(tmp_path: Path) -> None:
+    plain = tmp_path / "secret.txt"
+    enc = tmp_path / "secret.enc"
+    restored = tmp_path / "restored.txt"
+    plain.write_text("sensitive-payload", encoding="utf-8")
+
+    encrypt_file(plain, enc, "test-passphrase-123")
+    assert enc.exists()
+    assert enc.read_bytes() != plain.read_bytes()
+
+    decrypt_file(enc, restored, "test-passphrase-123")
+    assert restored.read_text(encoding="utf-8") == "sensitive-payload"
+security-ci.yml
+
 Egret Engine
 ================================================
 Current Version: v3.1.5
