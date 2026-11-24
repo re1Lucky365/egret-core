@@ -1,3 +1,165 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE_DIR="${1:-.}"
+BACKUP_ROOT="${2:-$HOME/backups}"
+TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+STAGE_DIR="$(mktemp -d)"
+ARCHIVE_BASENAME="backup_${TIMESTAMP}"
+TAR_FILE="${STAGE_DIR}/${ARCHIVE_BASENAME}.tar"
+ZST_FILE="${BACKUP_ROOT}/${ARCHIVE_BASENAME}.tar.zst"
+MANIFEST_FILE="${BACKUP_ROOT}/${ARCHIVE_BASENAME}.sha256"
+
+cleanup() {
+  rm -rf "${STAGE_DIR}"
+}
+trap cleanup EXIT
+
+mkdir -p "${BACKUP_ROOT}"
+
+echo "[1/4] Staging files from '${SOURCE_DIR}' (excluding .git, target, __pycache__, node_modules, .venv)..."
+tar \
+  --exclude='.git' \
+  --exclude='target' \
+  --exclude='__pycache__' \
+  --exclude='node_modules' \
+  --exclude='.venv' \
+  --exclude='*.enc' \
+  -cf "${TAR_FILE}" \
+  -C "${SOURCE_DIR}" .
+
+echo "[2/4] Compressing archive with zstd..."
+zstd -19 -T0 --rm "${TAR_FILE}" -o "${ZST_FILE}"
+
+echo "[3/4] Generating SHA-256 checksum manifest..."
+sha256sum "${ZST_FILE}" > "${MANIFEST_FILE}"
+
+if [[ "${ENCRYPT_BACKUP:-0}" == "1" ]] && [[ -f "scripts/vault_encrypt.py" ]]; then
+  echo "[4/4] Encrypting archive with vault_encrypt.py..."
+  python3 scripts/vault_encrypt.py encrypt "${ZST_FILE}" "${ZST_FILE}.enc"
+  sha256sum "${ZST_FILE}.enc" >> "${MANIFEST_FILE}"
+  rm -f "${ZST_FILE}"
+  echo "Backup written: ${ZST_FILE}.enc"
+else
+  echo "[4/4] Skipping encryption (set ENCRYPT_BACKUP=1 to encrypt). Backup written: ${ZST_FILE}"
+fi
+
+echo "Manifest written: ${MANIFEST_FILE}"
+Master-Hub/
+├── .github/
+│   └── workflows/
+│       └── master-ci.yml
+├── .gitleaks.toml
+├── .gitignore
+├── README.md
+├── scripts/
+│   ├── bootstrap.sh
+│   ├── audit_gpg.sh
+│   ├── hash_manifest.py
+│   ├── vault_encrypt.py
+│   └── backup_all.sh
+├── crates/
+│   └── integrity-cli/
+│       ├── Cargo.toml
+│       └── src/
+│           └── main.rs
+└── tests/
+    └── test_security_tools.py
+# Local secrets, keys, and sensitive artifacts
+*.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.enc
+vault/
+secrets/
+backups/
+
+# Generated manifests & build artifacts
+MANIFEST.sha256
+*.sha256
+*.tar
+*.tar.zst
+target/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+*.swp
+title = "Master-Hub Secret Scanning Rules"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-private-key-or-token"
+description = "Detect high-entropy private keys or bearer tokens"
+regex = '''(?i)(api_key|secret_key|private_key|access_token|auth_token)\s*[:=]\s*['"]?[A-Za-z0-9_\-]{20,}['"]?'''
+keywords = ["api_key", "secret_key", "private_key", "access_token", "auth_token"]
+
+[allowlist]
+description = "Allow test fixtures and placeholder examples"
+paths = [
+  '''tests/''',
+  '''README\.md$'''
+]
+Thumbs.db
+Robert Edward Evans 
+evansrobert517@gmail.com 
+evansrobert517@yahoo.com 
+adpsnake812@gmail.com
+adpsnake7@gmail.com 
+name: Master-Hub CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan for secrets with Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python test dependencies & run pytest
+        run: |
+          python -m pip install --upgrade pip pytest cryptography
+          pytest -v
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Rust integrity-cli tests
+        working-directory: crates/integrity-cli
+        run: cargo test --locked || cargo test
+# Master-Hub
+
+Local-first security verification, integrity hashing, symmetric vault encryption, and backup tooling.
+
+## Quick Start
+
+```bash
+chmod +x scripts/*.sh scripts/*.py
+./scripts/bootstrap.sh
+
 Egret Engine
 ================================================
 Current Version: v3.1.5
