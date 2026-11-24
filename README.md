@@ -1,3 +1,13 @@
+[Unit]
+Description=Master-Hub Data Pipeline Ingestion and Backup
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Master-Hub
+Environment=ENCRYPT_BACKUP=1
+ExecStart=/bin/bash -c 'set -euo pipefail; if [ -f data/incoming.jsonl ]; then python3 scripts/pipeline_ingest.py --input data/incoming.jsonl; fi; python3 scripts/hash_manifest.py generate --root . --output MANIFEST.sha256; bash scripts/backup_all.sh . "$HOME/backups"'
+
 #!/usr/bin/env bash
 set -euo pipefail
 
